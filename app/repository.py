@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from .core.replay import Event as CoreEvent
 from .core.replay import EventType
 from .models import Event as EventModel
-from .models import Freeze, Plan
+from .models import Freeze, Plan, SignDelegate, Signature, SignSession
 
 
 def get_plan(db: Session, plan_version: str) -> Plan | None:
@@ -143,3 +143,195 @@ def insert_freeze(
     if inserted is not None:
         return db.get(Freeze, (plan_version, freeze_id))
     return None
+
+
+def get_sign_session(
+    db: Session, plan_version: str, session_id: str
+) -> SignSession | None:
+    return db.get(SignSession, (plan_version, session_id))
+
+
+def insert_sign_session(
+    db: Session,
+    *,
+    plan_version: str,
+    session_id: str,
+    freeze_id: str,
+    content_hash: str,
+    quorum: int,
+    initiator: str,
+    expires_at: datetime | None,
+    delegates: dict[str, str],
+) -> SignSession | None:
+    """执行确定性的业务处理。"""
+    stmt = sqlite_insert(SignSession).values(
+        plan_version=plan_version,
+        session_id=session_id,
+        freeze_id=freeze_id,
+        content_hash=content_hash,
+        quorum=quorum,
+        initiator=initiator,
+        expires_at=expires_at,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["plan_version", "session_id"]
+    ).returning(SignSession.plan_version)
+    inserted = db.execute(stmt).scalar_one_or_none()
+    if inserted is not None:
+        for role in sorted(delegates):
+            delegate_stmt = sqlite_insert(SignDelegate).values(
+                plan_version=plan_version,
+                session_id=session_id,
+                role=role,
+                delegate_id=delegates[role],
+                conflict_of_interest=False,
+            )
+            db.execute(
+                delegate_stmt.on_conflict_do_nothing(
+                    index_elements=["plan_version", "session_id", "role"]
+                )
+            )
+    db.commit()
+    if inserted is not None:
+        return db.get(SignSession, (plan_version, session_id))
+    return None
+
+
+def get_delegate(
+    db: Session, plan_version: str, session_id: str, role: str
+) -> SignDelegate | None:
+    return db.get(SignDelegate, (plan_version, session_id, role))
+
+
+def get_delegates(
+    db: Session, plan_version: str, session_id: str
+) -> list[SignDelegate]:
+    stmt = (
+        select(SignDelegate)
+        .where(SignDelegate.plan_version == plan_version)
+        .where(SignDelegate.session_id == session_id)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def replace_delegate(
+    db: Session,
+    *,
+    plan_version: str,
+    session_id: str,
+    role: str,
+    delegate_id: str,
+    conflict_of_interest: bool,
+) -> SignDelegate:
+    """替换代表：旧代表的有效签名被取代，新代表上任。"""
+    now = datetime.now(timezone.utc)
+    supersede_stmt = (
+        update(Signature)
+        .where(Signature.plan_version == plan_version)
+        .where(Signature.session_id == session_id)
+        .where(Signature.role == role)
+        .where(Signature.signer_id != delegate_id)
+        .where(Signature.status == "active")
+        .values(status="superseded", updated_at=now)
+    )
+    db.execute(supersede_stmt)
+    stmt = sqlite_insert(SignDelegate).values(
+        plan_version=plan_version,
+        session_id=session_id,
+        role=role,
+        delegate_id=delegate_id,
+        conflict_of_interest=conflict_of_interest,
+        updated_at=now,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["plan_version", "session_id", "role"],
+        set_={
+            "delegate_id": delegate_id,
+            "conflict_of_interest": conflict_of_interest,
+            "updated_at": now,
+        },
+    )
+    db.execute(stmt)
+    db.commit()
+    row = get_delegate(db, plan_version, session_id, role)
+    assert row is not None
+    return row
+
+
+def get_signature(
+    db: Session, plan_version: str, session_id: str, role: str, signer_id: str
+) -> Signature | None:
+    return db.get(Signature, (plan_version, session_id, role, signer_id))
+
+
+def get_signatures(
+    db: Session, plan_version: str, session_id: str
+) -> list[Signature]:
+    stmt = (
+        select(Signature)
+        .where(Signature.plan_version == plan_version)
+        .where(Signature.session_id == session_id)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def insert_signature(
+    db: Session,
+    *,
+    plan_version: str,
+    session_id: str,
+    role: str,
+    signer_id: str,
+    content_hash: str,
+) -> Signature | None:
+    """执行确定性的业务处理。"""
+    stmt = sqlite_insert(Signature).values(
+        plan_version=plan_version,
+        session_id=session_id,
+        role=role,
+        signer_id=signer_id,
+        content_hash=content_hash,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["plan_version", "session_id", "role", "signer_id"]
+    ).returning(Signature.plan_version)
+    inserted = db.execute(stmt).scalar_one_or_none()
+    db.commit()
+    if inserted is not None:
+        return db.get(Signature, (plan_version, session_id, role, signer_id))
+    return None
+
+
+def update_signature_status(
+    db: Session,
+    signature: Signature,
+    *,
+    status: str,
+    content_hash: str | None = None,
+    signed_at: datetime | None = None,
+) -> Signature:
+    """执行确定性的业务处理。"""
+    signature.status = status
+    signature.updated_at = datetime.now(timezone.utc)
+    if content_hash is not None:
+        signature.content_hash = content_hash
+    if signed_at is not None:
+        signature.signed_at = signed_at
+    db.commit()
+    return signature
+
+
+def mark_session_published(
+    db: Session, plan_version: str, session_id: str, published_at: datetime
+) -> bool:
+    """条件更新保证并发发布时只有一个事务完成状态迁移。"""
+    stmt = (
+        update(SignSession)
+        .where(SignSession.plan_version == plan_version)
+        .where(SignSession.session_id == session_id)
+        .where(SignSession.status == "open")
+        .values(status="published", published_at=published_at)
+    )
+    result = db.execute(stmt)
+    db.commit()
+    return result.rowcount == 1

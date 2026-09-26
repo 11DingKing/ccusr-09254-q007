@@ -10,14 +10,19 @@ from sqlalchemy.orm import Session
 from . import services
 from .db import get_db
 from .schemas import (
+    DelegateReplaceIn,
     DiffOut,
     EventBatchIn,
     FreezeIn,
     ImportResult,
     PlanIn,
     PlanOut,
+    SignIn,
+    SignSessionInitIn,
+    SignSessionOut,
     SnapshotOut,
     StudentProgressOut,
+    WithdrawIn,
 )
 
 router = APIRouter(prefix="/api")
@@ -160,3 +165,155 @@ def get_diff(
         )
     except (services.PlanNotFoundError, services.FreezeNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _sign_session_http_errors(exc: Exception) -> HTTPException:
+    if isinstance(
+        exc,
+        (
+            services.PlanNotFoundError,
+            services.FreezeNotFoundError,
+            services.SignSessionNotFoundError,
+            services.SignatureNotFoundError,
+        ),
+    ):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, services.NotDelegateError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(
+        exc,
+        (
+            services.SignSessionClosedError,
+            services.QuorumNotMetError,
+            services.SnapshotContentChangedError,
+        ),
+    ):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, services.SignSessionConfigError):
+        return HTTPException(status_code=422, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post(
+    "/plans/{plan_version}/freezes/{freeze_id}/sign-sessions/{session_id}",
+    response_model=SignSessionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def initiate_sign_session(
+    plan_version: str,
+    freeze_id: str,
+    session_id: str,
+    body: SignSessionInitIn,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        state, _ = services.initiate_sign_session(
+            db,
+            plan_version=plan_version,
+            freeze_id=freeze_id,
+            session_id=session_id,
+            initiator=body.initiator,
+            delegates=body.delegates,
+            quorum=body.quorum,
+            expires_at=body.expires_at,
+        )
+        return state
+    except Exception as exc:
+        raise _sign_session_http_errors(exc) from exc
+
+
+@router.get(
+    "/plans/{plan_version}/sign-sessions/{session_id}",
+    response_model=SignSessionOut,
+)
+def get_sign_session(
+    plan_version: str, session_id: str, db: Session = Depends(get_db)
+) -> Any:
+    try:
+        return services.get_sign_session_state(db, plan_version, session_id)
+    except Exception as exc:
+        raise _sign_session_http_errors(exc) from exc
+
+
+@router.post(
+    "/plans/{plan_version}/sign-sessions/{session_id}/sign",
+    response_model=SignSessionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def sign_session(
+    plan_version: str,
+    session_id: str,
+    body: SignIn,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return services.sign_session(
+            db,
+            plan_version=plan_version,
+            session_id=session_id,
+            role=body.role,
+            signer_id=body.signer_id,
+        )
+    except Exception as exc:
+        raise _sign_session_http_errors(exc) from exc
+
+
+@router.post(
+    "/plans/{plan_version}/sign-sessions/{session_id}/withdraw",
+    response_model=SignSessionOut,
+)
+def withdraw_signature(
+    plan_version: str,
+    session_id: str,
+    body: WithdrawIn,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return services.withdraw_signature(
+            db,
+            plan_version=plan_version,
+            session_id=session_id,
+            role=body.role,
+            signer_id=body.signer_id,
+        )
+    except Exception as exc:
+        raise _sign_session_http_errors(exc) from exc
+
+
+@router.post(
+    "/plans/{plan_version}/sign-sessions/{session_id}/delegates/{role}",
+    response_model=SignSessionOut,
+)
+def replace_delegate(
+    plan_version: str,
+    session_id: str,
+    role: str,
+    body: DelegateReplaceIn,
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        return services.replace_delegate(
+            db,
+            plan_version=plan_version,
+            session_id=session_id,
+            role=role,
+            delegate_id=body.delegate_id,
+            conflict_of_interest=body.conflict_of_interest,
+        )
+    except Exception as exc:
+        raise _sign_session_http_errors(exc) from exc
+
+
+@router.post(
+    "/plans/{plan_version}/sign-sessions/{session_id}/publish",
+    response_model=SignSessionOut,
+)
+def publish_sign_session(
+    plan_version: str, session_id: str, db: Session = Depends(get_db)
+) -> Any:
+    try:
+        return services.publish_sign_session(
+            db, plan_version=plan_version, session_id=session_id
+        )
+    except Exception as exc:
+        raise _sign_session_http_errors(exc) from exc

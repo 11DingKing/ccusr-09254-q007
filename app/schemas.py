@@ -128,6 +128,84 @@ class FreezeIn(BaseModel):
     pass
 
 
+SIGN_ROLE_NAMES = ("registrar", "college", "audit")
+SignRole = Literal["registrar", "college", "audit"]
+
+
+class SignSessionInitIn(BaseModel):
+    initiator: str = Field(..., min_length=1, max_length=128)
+    delegates: dict[str, str]
+    quorum: int | None = Field(None, ge=1)
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _ensure_aware(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware (RFC 3339)")
+        return v
+
+    @model_validator(mode="after")
+    def _check_delegates(self) -> "SignSessionInitIn":
+        if set(self.delegates) != set(SIGN_ROLE_NAMES):
+            raise ValueError(
+                "delegates must name exactly one representative per role: "
+                + ", ".join(SIGN_ROLE_NAMES)
+            )
+        if any(not v.strip() for v in self.delegates.values()):
+            raise ValueError("delegate ids must be non-empty")
+        if self.quorum is not None and self.quorum > len(self.delegates):
+            raise ValueError("quorum cannot exceed the number of delegates")
+        return self
+
+
+class SignIn(BaseModel):
+    role: SignRole
+    signer_id: str = Field(..., min_length=1, max_length=128)
+
+
+class WithdrawIn(BaseModel):
+    role: SignRole
+    signer_id: str = Field(..., min_length=1, max_length=128)
+
+
+class DelegateReplaceIn(BaseModel):
+    delegate_id: str = Field(..., min_length=1, max_length=128)
+    conflict_of_interest: bool = False
+
+
+class DelegateOut(BaseModel):
+    role: str
+    delegate_id: str
+    conflict_of_interest: bool
+
+
+class SignatureOut(BaseModel):
+    role: str
+    signer_id: str
+    status: str
+    content_hash: str
+    signed_at: str
+    counts_toward_quorum: bool
+
+
+class SignSessionOut(BaseModel):
+    plan_version: str
+    session_id: str
+    freeze_id: str
+    status: str
+    expired: bool
+    quorum: int
+    valid_votes: int
+    content_hash: str
+    initiator: str
+    created_at: str
+    expires_at: str | None
+    published_at: str | None
+    delegates: list[DelegateOut]
+    signatures: list[SignatureOut]
+
+
 class DiffOut(BaseModel):
     plan_version: str
     old_freeze_id: str | None
