@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .core.replay import Event as CoreEvent
 from .core.replay import EventType
 from .models import Event as EventModel
-from .models import Freeze, Plan
+from .models import Freeze, Plan, SignSession, Signature
 
 
 def get_plan(db: Session, plan_version: str) -> Plan | None:
@@ -143,3 +143,114 @@ def insert_freeze(
     if inserted is not None:
         return db.get(Freeze, (plan_version, freeze_id))
     return None
+
+
+def insert_sign_session(
+    db: Session,
+    *,
+    plan_version: str,
+    session_id: str,
+    freeze_id: str,
+    snapshot: dict[str, Any],
+    event_cutoff_id: str | None,
+    quorum: int,
+    delegates: dict[str, str],
+    created_by: str,
+    expires_at: datetime | None,
+) -> SignSession | None:
+    """发起签署会话；同一会话标识重复发起时不覆盖既有内容。"""
+    stmt = sqlite_insert(SignSession).values(
+        plan_version=plan_version,
+        session_id=session_id,
+        freeze_id=freeze_id,
+        snapshot=snapshot,
+        event_cutoff_id=event_cutoff_id,
+        quorum=quorum,
+        delegates=delegates,
+        delegate_history=[],
+        created_by=created_by,
+        expires_at=expires_at,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["plan_version", "session_id"]
+    ).returning(SignSession.plan_version)
+    inserted = db.execute(stmt).scalar_one_or_none()
+    db.commit()
+    if inserted is not None:
+        return db.get(SignSession, (plan_version, session_id))
+    return None
+
+
+def get_sign_session(
+    db: Session, plan_version: str, session_id: str
+) -> SignSession | None:
+    return db.get(SignSession, (plan_version, session_id))
+
+
+def save_sign_session(db: Session, session: SignSession) -> SignSession:
+    """持久化会话上的代表变更、发布标记等就地修改。"""
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def insert_signature(
+    db: Session,
+    *,
+    plan_version: str,
+    session_id: str,
+    role: str,
+    signer_id: str,
+    signed_at: datetime,
+) -> Signature | None:
+    """记录签名；同一代表对同一角色重复签署时不产生重复行。"""
+    stmt = sqlite_insert(Signature).values(
+        plan_version=plan_version,
+        session_id=session_id,
+        role=role,
+        signer_id=signer_id,
+        signed_at=signed_at,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["plan_version", "session_id", "role", "signer_id"]
+    ).returning(Signature.id)
+    inserted = db.execute(stmt).scalar_one_or_none()
+    db.commit()
+    if inserted is not None:
+        return db.get(Signature, inserted)
+    return None
+
+
+def get_signature(
+    db: Session, plan_version: str, session_id: str, role: str, signer_id: str
+) -> Signature | None:
+    stmt = select(Signature).where(
+        Signature.plan_version == plan_version,
+        Signature.session_id == session_id,
+        Signature.role == role,
+        Signature.signer_id == signer_id,
+    )
+    return db.execute(stmt).scalar_one_or_none()
+
+
+def list_signatures(
+    db: Session, plan_version: str, session_id: str
+) -> list[Signature]:
+    stmt = (
+        select(Signature)
+        .where(
+            Signature.plan_version == plan_version,
+            Signature.session_id == session_id,
+        )
+        .order_by(Signature.id)
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
+def save_signature(db: Session, signature: Signature) -> Signature:
+    """持久化签名的撤回或重新签署状态。"""
+    db.add(signature)
+    db.commit()
+    db.refresh(signature)
+    return signature

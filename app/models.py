@@ -69,3 +69,61 @@ class Freeze(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
     )
+
+
+class SignSession(Base):
+    """冻结签署会话：快照内容在发起时固定，随后收集角色签名。"""
+
+    __tablename__ = "sign_sessions"
+
+    plan_version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    freeze_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    event_cutoff_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    quorum: Mapped[int] = mapped_column(Integer, nullable=False)
+    delegates: Mapped[dict] = mapped_column(JSON, nullable=False)
+    delegate_history: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_by: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("quorum >= 1", name="ck_sign_sessions_quorum_positive"),
+    )
+
+
+class Signature(Base):
+    """角色代表对签署会话的一次签名，可撤回；有效性按当前代表动态判定。"""
+
+    __tablename__ = "signatures"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plan_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), nullable=False)
+    signer_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    signed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow, server_default=func.now()
+    )
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_version",
+            "session_id",
+            "role",
+            "signer_id",
+            name="uq_signatures_session_role_signer",
+        ),
+        Index("ix_signatures_session", "plan_version", "session_id"),
+    )

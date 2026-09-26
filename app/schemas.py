@@ -128,6 +128,63 @@ class FreezeIn(BaseModel):
     pass
 
 
+class SignSessionIn(BaseModel):
+    freeze_id: str = Field(..., min_length=1, max_length=128)
+    delegates: dict[str, str]
+    quorum: int | None = Field(None, ge=1)
+    ttl_seconds: int | None = Field(None, gt=0)
+    expires_at: datetime | None = None
+    created_by: str = ""
+
+    @field_validator("expires_at")
+    @classmethod
+    def _ensure_aware(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware (RFC 3339)")
+        return v
+
+
+class SignIn(BaseModel):
+    signer_id: str = Field(..., min_length=1, max_length=128)
+
+
+class WithdrawIn(BaseModel):
+    signer_id: str = Field(..., min_length=1, max_length=128)
+
+
+class DelegateReplaceIn(BaseModel):
+    delegate_id: str = Field(..., min_length=1, max_length=128)
+    reason: str = ""
+    actor_id: str = ""
+
+
+class SignatureOut(BaseModel):
+    role: str
+    signer_id: str
+    signed_at: str | None
+    withdrawn_at: str | None
+    valid: bool
+
+
+class SignSessionOut(BaseModel):
+    plan_version: str
+    session_id: str
+    freeze_id: str
+    status: str
+    quorum: int
+    valid_votes: int
+    quorum_met: bool
+    delegates: dict[str, str]
+    delegate_history: list[dict[str, Any]]
+    signatures: list[SignatureOut]
+    event_cutoff_id: str | None
+    snapshot: dict[str, Any]
+    created_by: str
+    created_at: str | None
+    expires_at: str | None
+    published_at: str | None
+
+
 class DiffOut(BaseModel):
     plan_version: str
     old_freeze_id: str | None
